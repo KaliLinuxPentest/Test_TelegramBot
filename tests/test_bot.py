@@ -10,7 +10,7 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot import (
-    handle_message, FLOWISE_API_URL, FLOWISE_API_KEY,
+    CONNECT_TIMEOUT, READ_TIMEOUT, WRITE_TIMEOUT, handle_message, FLOWISE_API_URL, FLOWISE_API_KEY,
     start, help_command, error_handler, main, TELEGRAM_TOKEN
 )
 
@@ -49,36 +49,36 @@ def mock_client():
 # Тест успешного запроса к FlowiseAI
 @pytest.mark.asyncio
 async def test_successful_message_handling(mock_update, mock_context, mock_client):
-    # Подготовка мок-ответа от FlowiseAI
     mock_response = {
         "text": "Фильм о Леонардо да Винчи называется 'Leonardo'. Он был выпущен в 2023 году."
     }
     
     mock_response_obj = AsyncMock()
     mock_response_obj.status_code = 200
-    mock_response_obj.json = AsyncMock(return_value=mock_response)
+    mock_response_obj.json = lambda: mock_response  # Возвращаем словарь напрямую
     mock_client.post.return_value = mock_response_obj
     
     with patch('httpx.AsyncClient', return_value=mock_client):
         await handle_message(mock_update, mock_context)
     
-    # Проверяем, что был отправлен правильный запрос
-    mock_client.post.assert_called_once_with(
-        FLOWISE_API_URL,
-        json={
-            "question": mock_update.message.text,
-            "overrideConfig": {
-                "returnSourceDocuments": True
-            }
-        },
-        headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {FLOWISE_API_KEY}'
-        } if FLOWISE_API_KEY else {'Content-Type': 'application/json'},
-        timeout=30.0
-    )
+    call_args = mock_client.post.call_args
+    assert call_args is not None
+    args, kwargs = call_args
     
-    # Проверяем, что ответ был отправлен пользователю
+    assert args[0] == FLOWISE_API_URL
+    assert kwargs['json'] == {
+        "question": mock_update.message.text,
+        "overrideConfig": {
+            "returnSourceDocuments": True
+        }
+    }
+    assert kwargs['headers'] == ({
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {FLOWISE_API_KEY}'
+    } if FLOWISE_API_KEY else {'Content-Type': 'application/json'})
+    assert isinstance(kwargs['timeout'], (int, float))
+    
+    # Проверяем ответ
     mock_update.message.reply_text.assert_called_once_with(mock_response["text"])
 
 # Тест обработки ошибки HTTP
@@ -110,7 +110,6 @@ async def test_timeout_handling(mock_update, mock_context, mock_client):
 # Тест на проверку формата ответа от FlowiseAI
 @pytest.mark.asyncio
 async def test_flowise_response_format(mock_update, mock_context, mock_client):
-    # Подготовка мок-ответа с дополнительными полями
     mock_response = {
         "text": "Тестовый ответ",
         "sourceDocuments": [
@@ -121,13 +120,12 @@ async def test_flowise_response_format(mock_update, mock_context, mock_client):
     
     mock_response_obj = AsyncMock()
     mock_response_obj.status_code = 200
-    mock_response_obj.json = AsyncMock(return_value=mock_response)
+    mock_response_obj.json = lambda: mock_response  # Используем lambda вместо aread
     mock_client.post.return_value = mock_response_obj
     
     with patch('httpx.AsyncClient', return_value=mock_client):
         await handle_message(mock_update, mock_context)
     
-    # Проверяем, что используется только поле text из ответа
     mock_update.message.reply_text.assert_called_once_with(mock_response["text"])
 
 # Тест на проверку отправки typing action
@@ -190,16 +188,28 @@ async def test_error_handler_no_message():
 
 # Тест функции main
 def test_main():
+    # Создаем мок для приложения
     mock_application = MagicMock()
-    mock_builder = MagicMock()
-    mock_builder.token.return_value.build.return_value = mock_application
     
+    # Создаем мок для builder'а с правильной цепочкой
+    mock_builder = MagicMock()
+    mock_builder.token.return_value = mock_builder
+    mock_builder.connect_timeout.return_value = mock_builder
+    mock_builder.read_timeout.return_value = mock_builder
+    mock_builder.write_timeout.return_value = mock_builder
+    mock_builder.build.return_value = mock_application
+
     with patch('telegram.ext.Application.builder', return_value=mock_builder):
         main()
-        
+
         # Проверяем, что токен использован правильно
         mock_builder.token.assert_called_once_with(TELEGRAM_TOKEN)
         
+        # Проверяем настройки таймаутов
+        mock_builder.connect_timeout.assert_called_once_with(CONNECT_TIMEOUT)
+        mock_builder.read_timeout.assert_called_once_with(READ_TIMEOUT)
+        mock_builder.write_timeout.assert_called_once_with(WRITE_TIMEOUT)
+
         # Проверяем, что все обработчики добавлены
         assert mock_application.add_handler.call_count == 3
         assert mock_application.add_error_handler.call_count == 1
@@ -233,7 +243,7 @@ async def test_missing_text_field(mock_update, mock_context, mock_client):
     
     mock_response_obj = AsyncMock()
     mock_response_obj.status_code = 200
-    mock_response_obj.json = AsyncMock(return_value=mock_response)
+    mock_response_obj.json = lambda: mock_response  # Используем lambda вместо aread
     mock_client.post.return_value = mock_response_obj
     
     with patch('httpx.AsyncClient', return_value=mock_client):

@@ -5,6 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import httpx
 import json
+from telegram.error import TimedOut, NetworkError
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -18,8 +19,13 @@ logger = logging.getLogger(__name__)
 
 # Получение переменных окружения
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-FLOWISE_API_URL = os.getenv('FLOWISE_API_URL', 'https://fork.start-ai.ru/api/v1/prediction/194a0cbf-2f66-4afc-afa7-b3fa340216a4')
+FLOWISE_API_URL = os.getenv('FLOWISE_API_URL')
 FLOWISE_API_KEY = os.getenv('FLOWISE_API_KEY')
+
+# Настройки для подключения
+CONNECT_TIMEOUT = 30.0
+READ_TIMEOUT = 30.0
+WRITE_TIMEOUT = 30.0
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
@@ -34,18 +40,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
     try:
-        # Отправляем индикатор набора текста
         await update.message.chat.send_action(action="typing")
         
         headers = {
             'Content-Type': 'application/json'
         }
         
-        # Добавляем API ключ, если он установлен
         if FLOWISE_API_KEY:
             headers['Authorization'] = f'Bearer {FLOWISE_API_KEY}'
 
-        # Подготовка данных для отправки в FlowiseAI
         payload = {
             "question": update.message.text,
             "overrideConfig": {
@@ -62,10 +65,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             
             if response.status_code == 200:
-                result = await response.json()
-                # Извлекаем ответ из результата
-                answer = result.get('text', 'Извините, не удалось получить ответ.')
-                await update.message.reply_text(answer)
+                try:
+                    result_json = response.json()  # Используем встроенный метод json()
+                    answer = result_json.get('text', 'Извините, не удалось получить ответ.')
+                    await update.message.reply_text(answer)
+                except json.JSONDecodeError:
+                    logger.error("Ошибка при разборе JSON ответа")
+                    await update.message.reply_text(
+                        "Извините, произошла ошибка при обработке ответа. Попробуйте позже."
+                    )
             else:
                 error_msg = f"Ошибка при получении ответа: HTTP {response.status_code}"
                 logger.error(error_msg)
@@ -73,8 +81,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "Извините, произошла ошибка при обработке вашего запроса. Попробуйте позже."
                 )
 
-    except httpx.TimeoutException:
-        logger.error("Timeout при запросе к FlowiseAI API")
+    except (httpx.TimeoutException, TimedOut, NetworkError) as e:
+        logger.error(f"Timeout или сетевая ошибка: {str(e)}")
         await update.message.reply_text(
             "Извините, время ожидания ответа истекло. Попробуйте повторить запрос."
         )
@@ -94,8 +102,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     """Запуск бота"""
-    # Создаем приложение
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Создаем приложение с настройками таймаутов
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .write_timeout(WRITE_TIMEOUT)
+        .build()
+    )
 
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
@@ -106,7 +121,8 @@ def main() -> None:
     application.add_error_handler(error_handler)
 
     # Запускаем бота
-    application.run_polling()
+    logger.info("Запуск бота...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main() 
